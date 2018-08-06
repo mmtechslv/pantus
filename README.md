@@ -6,4 +6,4 @@ Pantus provide following features
 * Automatically generate playlist with extracted records in Spotify (working on it)
 * Automatically generate playlist with extracted records in Youtube (not yet)
 
-*Note that pantus is currently under development*
+*Note that pantus is currently under development. If you are interested and would like to contribute please contact me.*
