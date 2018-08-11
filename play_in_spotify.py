@@ -1,8 +1,8 @@
 import pantus_shared as pantus
 
 #Set spotify parameters
-client_id='33ecbcf3e4ab41f0958d4997bbf8d030'
-client_secret='37fbf6456c994f5981f771d1323efd81'
+client_id='ENTER HERE SPOTIFY CLIENT ID'
+client_secret='ENTER HERE SPOTIFY CLIENT SECRET'
 redirect_uri = 'http://127.0.0.1:8000/spotipy_callback' #This redirect_uri must be added into "Redirect URIs", which can be found in the dashboard settings of spotify for developers page
 
 #Required genre filter and spotify playlist name
