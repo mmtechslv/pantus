@@ -1,56 +1,163 @@
+#Required modules
 from http.server import HTTPServer, BaseHTTPRequestHandler 
-import sqlite3, threading, xlrd, webbrowser, spotipy
+import threading, webbrowser,time,requests, json, base64, xlrd, sqlite3, pylast
 
-spotify_response = False
+#Global Internal Variables. THESE VARIABLES ARE INITIALIZED BY pantus_base CLASS. DO NOT CHANGE THEM MANUALLY!
+__PANTUS_HTTP_RESPONSE = False
+__PANTUS_HTTP_TIMEOUT = False
 
-class pantus_HTTPServer_RequestHandler(BaseHTTPRequestHandler): #Request handler for HTTP Server. This function will save spotify authorization code in spotify_response 
-  def do_GET(self):
-        global spotify_response
-        global html_response
+class pantus_HTTPServer_RequestHandler(BaseHTTPRequestHandler): #This is current HTTP Request handler but it will probably be changed later.
+    def setup(self):
+        BaseHTTPRequestHandler.setup(self)        
+        self.timeout = __PANTUS_HTTP_TIMEOUT
+    def do_GET(self):
+        global __PANTUS_HTTP_RESPONSE
         redirect_path = self.path # Get complete url path
-        spotify_response = {k:v for k,v in [elem.split('=') for elem in redirect_path[(redirect_path.find('?')+1):len(redirect_path)].split('&')]} # Convert parameters from path string into dictionary
+        try:
+            __PANTUS_HTTP_RESPONSE = {k:v for k,v in [elem.split('=') for elem in redirect_path[(redirect_path.find('?')+1):len(redirect_path)].split('&')]} # Convert parameters from path string into dictionary
+        except ValueError:
+            print("\nPantus: ValueError in redirect_path parsing. Probably only one argument received.\n")
+        except:
+            print("\nPantus: Unknown Error Occured.\n")
         #HTML response string
-        if 'error' in spotify_response.keys(): 
-            html_response = 'Pantus: An error occured during authorization code flow. <br/> Error:'+spotify_response['error']
-        else:
-            html_response = 'Pantus: Spotify authorization code was successfully received. Please,  close this page!'
+        try:
+            if 'error' in __PANTUS_HTTP_RESPONSE.keys(): 
+                html_response = '\nPantus: An error occured during authorization code flow. <br/> Redirect Path:'+redirect_path+'\n'
+            else:
+                html_response = '\nPantus: Authorization code was successfully received. This page can be closed now!\n'
+        except AttributeError:
+            html_response = '\nPantus: An error occured during authorization code flow. <br/> Redirect Path:'+redirect_path+'\n'
+            
         self.send_response(200)
         self.send_header('Content-type','text/html')
         self.end_headers()
         self.wfile.write(bytes(html_response, "utf8")) #Echo response string
         return
 
-
-def get_spotify_code(authorization_url,host = '127.0.0.1', port = 8000): #This function returns spotify authorization code
-    global spotify_response
-    server_address = (host,port)
-    httpd = HTTPServer(server_address, pantus_HTTPServer_RequestHandler)#Create HTTP server object
-    httpd_thread = threading.Thread(target = httpd.handle_request)#Pass handle_request to different thread in order to continue code flow
-    httpd_thread.start()#Start HTTP server and allow handle_request to listen 
-    webbrowser.open_new(authorization_url) #Go to authorization url from the default browser
-    retval = False
-    while True: # Listen to reply from authorization url and save recieved authorization code
-        if not type(spotify_response)==bool:
-            if 'error' in spotify_response.keys():
-                retval = spotify_response['error']
-                break;
-            elif 'code' in spotify_response.keys():
-                retval = spotify_response['code']
-                break;
-    spotify_response = False
-    httpd.server_close() #Close HTTP server
-    return retval #Return spotify authorization code
-
-def get_spotipy_handle(in_client_id,in_client_secret,in_redirect_uri,in_scope): #This function returns spotify object
-    sp_oauth = spotipy.oauth2.SpotifyOAuth(in_client_id, in_client_secret,in_redirect_uri,scope=in_scope) # Run authorization flow for given client_id, client_secret, scope and redirect_uri
-    authorization_url = sp_oauth.get_authorize_url() # Get authorization url in URL format
-    code = get_spotify_code(authorization_url) # Use get_spotify_code to get authorization code from https://accounts.spotify.com/authorize
-    token_info = sp_oauth.get_access_token(code) # Get authorization token info for provided  authorization code from https://accounts.spotify.com/authorize
-    token = token_info['access_token'] #Set token to authorization token
-    return spotipy.Spotify(auth=token) #Use authorization token and return usefull spotify object
+class pantus_base(object): #Base pantus class
+    def __init__(self):
+        self.tokens = False #Variable where necessary tokens will be stored
+        self.API_params = {'key': False,'secret': False} #Dict where API key and secret are stored
+        self.host = '127.0.0.1' #Default local host
+        self.port = 8000 # Default localhost port. This number is modified by class method new_port() in order to avoid httpd overlaps
+        self.error_msg = False #Error Messages
+        self.http_timeout = 30 # Default timeout in seconds
+        self.redirect_path = '/pantus_callback' # Default callback path
+        self.redirect_uri = 'http://'+self.host+':'+str(self.port)+self.redirect_path #Default  complete redirect URI
+        self.init_ready = False #Initialization check
+        self.exchange_code = False #Exchange URI parameter. "token" for last.fm and "code" for spotify
+        self.http_thread = False #Thread handle
+     
+    def get_latest_error(self):  #Retrieve latest error message
+        print('\nPantus: '+self.error_msg+'\n')
+        return self.error_msg
+        
+    def set_redirect_path(self,path):# Set redirect path and evaluate its URI
+        self.redirect_path = path
+        self.redirect_uri = 'http://'+str(self.host)+':'+self.port+path
+        return True
     
+    def set_API_params(self,key,secret): #Set API params
+        self.API_params['key'] = key
+        self.API_params['secret'] = secret
+        return True
+    
+    def check_thread(self): #Check if thread is alive
+        return self.http_thread.isAlive() if self.http_thread else False
+    
+    def wait_for_timeout(self):#Wait until thread is dead. Does not work at this point needs correction
+        while self.check_thread():
+            time.sleep(0.2)
+        return 
 
-# DATABASE STUFF
+    def get_auth_code(self,authorization_url): #This function returns authorization code
+        global __PANTUS_HTTP_RESPONSE
+        global __PANTUS_HTTP_TIMEOUT
+        __PANTUS_HTTP_TIMEOUT = self.http_timeout #Declares timeout global so that request handler also use it
+        server_address = (self.host,self.port) #Server host and port
+        httpd = HTTPServer(server_address, pantus_HTTPServer_RequestHandler)#Create HTTP server object
+        self.http_thread = threading.Thread(target = httpd.serve_forever) #Pass handle_request to different thread in order to continue code flow
+        self.http_thread.start()#Start HTTP server and allow handle_request to listen 
+        webbrowser.open_new(authorization_url) #Go to authorization url from the default browser
+        retval = False
+        timeout = time.time()+__PANTUS_HTTP_TIMEOUT #Timeout for the following loop
+        while True: # Listen to reply from authorization url and save recieved authorization code
+            if time.time() > timeout: #Check for timeout
+                retval = 'HTTP Timeout('+str(self.http_timeout)+'s).' #Return timeout error
+                break;
+            time.sleep(0.5)
+            if not type(__PANTUS_HTTP_RESPONSE)==bool: #Check if response was retrieved in HTTP request handler
+                if 'error' in __PANTUS_HTTP_RESPONSE.keys():
+                    retval = __PANTUS_HTTP_RESPONSE['error'] #Return response error
+                    break;
+                if self.exchange_code in __PANTUS_HTTP_RESPONSE.keys():
+                    retval = __PANTUS_HTTP_RESPONSE[self.exchange_code] #Return exchange code such as authorization token for spotify or last.fm
+                    break;
+        __PANTUS_HTTP_RESPONSE = False #Reset global response variable
+        __PANTUS_HTTP_TIMEOUT = False #Reset global timeout variable
+        httpd.server_close() #Close HTTP server
+        return retval 
+     
+class pantus_spotify(pantus_base): #This is class that works with spotify
+    def __init__(self): # Adding missing attributes for the spotify class
+        super(pantus_spotify,self).__init__()
+        self.spotify_scope = False
+        self.exchange_code = 'code'
+        
+    def get_authorize_url(self): #Get authorization url for spotify 
+        return 'https://accounts.spotify.com/authorize/?client_id='+self.API_params['key']+'&response_type=code&redirect_uri='+self.redirect_uri+'&scope='+self.spotify_scope
+    
+    def check_init(self):# Check if spotify class is ready to go for authorization flow
+        if (self.API_params['key'] and self.API_params['secret'] and self.spotify_scope and self.redirect_uri):
+            self.init_ready = True
+        else:
+            self.init_ready = False
+        return self.init_ready
+    
+    def get_spotify_tokens(self,auth_code): # Get spotify access and refresh tokens 
+        response = requests.post(url = "https://accounts.spotify.com/api/token/", headers = {"content-type":'application/x-www-form-urlencoded'}, data={'grant_type': 'authorization_code', 'code': auth_code, 'redirect_uri': self.redirect_uri,'client_id':self.API_params['key'], 'client_secret':self.API_params['secret']})
+        if response.status_code == 200:
+            return json.loads(str(response.text))
+        else:
+            self.error_msg = 'Spotify Tokens can not be retrieved. Status Code: '+ str(response.status_code) + '. Reason: '+ str(response.reason)
+            return False
+        
+    def get_spotify_handle(self): # Get spotify handle but for now only returns spotify acess tokens
+        if not self.check_init(): #Check if everything is ready
+            self.error_msg = "Spotify error can not initialize"
+            return False
+        if self.check_thread(): # Check if thread is ready. Does not work properly
+            self.wait_for_timeout()
+        auth_url = self.get_authorize_url() #Get authorization url
+        code = self.get_auth_code(auth_url) #Get authorization code
+        tokens = self.get_spotify_tokens(code) #Get access and refresh tokens
+        return tokens
+    
+class pantus_lastfm(pantus_base): #This is class that works with last.fm
+    def __init__(self): #Adding missing attributes for the last.fm class
+        super(pantus_lastfm,self).__init__()
+        self.exchange_code = 'token'
+        
+    def get_authorize_url(self): # Get authorization url
+        return "http://www.last.fm/api/auth/?api_key="+self.API_params['key']+'&cb='+self.redirect_uri
+    
+    def check_init(self): #Check if last.fm class is ready to go for authorization flow
+        if (self.API_params['key'] and self.API_params['secret']):
+            self.init_ready = True
+        return self.init_ready
+    
+    def get_lastfm_token(self): #Get last.fm access tokens
+        if not self.check_init(): #Chekc if everything is ready
+            self.error_msg = "last.fm API parameters are not initialized!"
+            return False
+        if self.check_thread(): #Check if thread is ready. Does not work properly
+            self.wait_for_timeout()
+        auth_url = self.get_authorize_url() # Get authorization url
+        token = self.get_auth_code(auth_url) # Get access/authorization token for last.fm
+        return token
+    
+# AT THIS POINT DATABASE METHODS START
+
 def reload_db(pantus_obj,xls_filename): # This function clears database and reloads database with new data from excel file
     pantus_obj.db_truncate_all() #Clear database data
     workbook = xlrd.open_workbook(xls_filename) #Load excel file
@@ -65,7 +172,7 @@ def reload_db(pantus_obj,xls_filename): # This function clears database and relo
         new_mark1 = 1 if data[5][i]=='x' else 0
         pantus_obj.add_new_record(new_artist,new_track,new_genres,new_decade,new_tags,mark1=new_mark1)
     return True
-        
+    
 class pantus_db: #This is main class responsible for working with SQLite database file
 
     def __init__(self,value): 
@@ -296,3 +403,4 @@ class pantus_db: #This is main class responsible for working with SQLite databas
         self.db_cursor.execute("DELETE FROM GENRES_TABLE")
         self.db_cursor.execute("DELETE FROM RECORD_GENRE_RTABLE")
         return self.db_connection.commit()
+
